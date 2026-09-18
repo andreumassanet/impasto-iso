@@ -42,8 +42,7 @@ in **Disk configuration**. Then **Authentication** for your user and
 Reboot when it is done. The first boot takes 10 to 20 minutes, online, and if
 something fails it says why and offers to try again. The first time you log
 in, a terminal builds the two Hyprland plugins, which can only be built from
-inside the session: hyprpm asks for your password at each step, and to confirm
-each plugin's repository.
+inside the session: it asks for your password once.
 
 ## Testing it
 
