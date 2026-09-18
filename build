@@ -68,6 +68,12 @@ sed -i -e 's/^iso_name=.*/iso_name="impasto"/' \
 printf 'file_permissions+=(["/usr/local/bin/impasto-install"]="0:0:755")\n' >> "$profile/profiledef.sh"
 grep -rl 'Arch Linux install medium' "$profile/efiboot" "$profile/syslinux" "$profile/grub" |
     xargs -r sed -i 's/Arch Linux install medium/impasto install medium/'
+# releng's UEFI menu beeps on every key, for the entry with speech; the
+# installer after it is not read aloud, so the beep is only noise. Every menu
+# waits five seconds rather than 15.
+sed -i -e 's/^beep on$/beep off/' -e 's/^timeout 15$/timeout 5/' "$profile/efiboot/loader/loader.conf"
+sed -i 's/^TIMEOUT 150$/TIMEOUT 50/' "$profile/syslinux/archiso_sys.cfg"
+sed -i 's/^timeout=15$/timeout=5/' "$profile/grub/grub.cfg" "$profile/grub/loopback.cfg"
 
 cat >> "$profile/airootfs/root/.zlogin" <<'EOF'
 
