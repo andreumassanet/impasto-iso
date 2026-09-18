@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   T E S T                                                                │
+# │   the ISO in a virtual machine · install, boot, look                     │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# Usage:
+#   ./test install [ISO] [--local PATH]  a fresh disk, installed with no
+#                                        questions (user and password: impasto);
+#                                        --local installs that checkout, as git
+#                                        would carry it, instead of GitHub's
+#   ./test boot                          boot the installed disk: the first
+#                                        boot, then the login screen
+#   ./test live [ISO]                    the medium alone, to go through the
+#                                        installer by hand
+#   ./test shot [FILE]                   a picture of the screen
+#   ./test type TEXT                     type TEXT
+#   ./test key KEY...                    press keys (QEMU names: ret, tab, ctrl-alt-f2)
+#   ./test stop                          switch the machine off
+#
+# Everything lands in test-run/: the disk, the firmware's variables, the
+# serial console (serial.log, where the first boot writes too) and the
+# pictures. Runs as the user; needs qemu-desktop and edk2-ovmf.
+
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+T=$HERE/test-run
+OVMF=/usr/share/edk2/x64
+QMP=$T/qmp.sock
+GIT_PORT=9418
+
+fail() { printf 'test: %s\n' "$*" >&2; exit 1; }
+
+latest_iso() {
+    local iso
+    iso=$(ls -t "$HERE"/out/*.iso 2>/dev/null | head -1)
+    [[ -n $iso ]] || fail 'no ISO in out/: sudo ./build first'
+    echo "$iso"
+}
+
+running() { [[ -S $QMP ]] && qmp query-status >/dev/null 2>&1; }
+
+# One QMP command, arguments as JSON.
+qmp() {
+    local arguments=${2:-}
+    python3 - "$QMP" "$1" "${arguments:-"{}"}" <<'PY'
+import json, socket, sys
+path, command, arguments = sys.argv[1:]
+s = socket.socket(socket.AF_UNIX)
+s.connect(path)
+f = s.makefile("rw")
+f.readline()
+for message in ({"execute": "qmp_capabilities"}, {"execute": command, "arguments": json.loads(arguments)}):
+    f.write(json.dumps(message) + "\n")
+    f.flush()
+    while True:
+        reply = json.loads(f.readline())
+        if "event" not in reply:
+            break
+if "error" in reply:
+    sys.exit(reply["error"]["desc"])
+print(json.dumps(reply.get("return", {})))
+PY
+}
+
+# The disk boots second, so an empty one falls through to the medium.
+# TEST_GPU=plain drops the GL display, for a host without a render node.
+machine() {
+    running && fail 'a machine is already running: ./test stop'
+    rm -f "$QMP"
+    local -a gpu=(-device virtio-vga-gl -display egl-headless,rendernode=/dev/dri/renderD128
+                  -vnc unix:"$T/vnc.sock")
+    if [[ ${TEST_GPU:-} == plain ]]; then gpu=(-device virtio-vga -display none); fi
+    qemu-system-x86_64 -enable-kvm -machine q35 -cpu host -smp 4 -m 6G \
+        -drive if=pflash,format=raw,unit=0,readonly=on,file="$OVMF/OVMF_CODE.4m.fd" \
+        -drive if=pflash,format=raw,unit=1,file="$T/vars.fd" \
+        -drive if=none,id=disk,file="$T/disk.qcow2",format=qcow2 \
+        -device virtio-blk-pci,drive=disk,bootindex=1 \
+        -nic user,model=virtio-net-pci \
+        "${gpu[@]}" \
+        -qmp unix:"$QMP",server=on,wait=off \
+        -serial file:"$T/serial.log" \
+        -daemonize -pidfile "$T/qemu.pid" \
+        "$@"
+    say "running · ./test shot · tail -f $T/serial.log"
+}
+
+# The medium, booted first.
+medium() {
+    printf '%s\n' -drive "if=none,id=cd,media=cdrom,readonly=on,file=$1" -device ide-cd,drive=cd,bus=ide.0,bootindex=0
+}
+
+say() { printf '  %s\n' "$*"; }
+
+# A GL scanout leaves QMP's screendump nothing to read, so the picture comes
+# from QEMU's VNC server instead: RFB 3.8, no auth, one raw full frame.
+vnc_shot() {
+    python3 - "$T/vnc.sock" "$1" <<'PY'
+import socket, struct, subprocess, sys
+path, out = sys.argv[1:]
+s = socket.socket(socket.AF_UNIX)
+s.connect(path)
+def take(n):
+    data = b""
+    while len(data) < n:
+        chunk = s.recv(n - len(data))
+        if not chunk:
+            raise SystemExit("vnc closed")
+        data += chunk
+    return data
+take(12)
+s.sendall(b"RFB 003.008\n")
+types = take(take(1)[0])
+if 1 not in types:
+    raise SystemExit("vnc wants a password")
+s.sendall(b"\x01")
+if struct.unpack(">I", take(4))[0] != 0:
+    raise SystemExit("vnc refused")
+s.sendall(b"\x01")
+width, height = struct.unpack(">HH", take(4))
+take(16)
+take(struct.unpack(">I", take(4))[0])
+s.sendall(struct.pack(">B3xBBBBHHHBBB3x", 0, 32, 24, 0, 1, 255, 255, 255, 16, 8, 0))
+s.sendall(struct.pack(">BxHi", 2, 1, 0))
+s.sendall(struct.pack(">BBHHHH", 3, 0, 0, 0, width, height))
+frame = bytearray(width * height * 3)
+while True:
+    kind = take(1)[0]
+    if kind == 0:
+        break
+    if kind == 2:
+        continue
+    if kind == 3:
+        take(3)
+        take(struct.unpack(">I", take(4))[0])
+        continue
+    raise SystemExit(f"vnc message {kind}")
+take(1)
+for _ in range(struct.unpack(">H", take(2))[0]):
+    x, y, w, h, encoding = struct.unpack(">HHHHi", take(12))
+    if encoding != 0:
+        continue
+    raw = take(w * h * 4)
+    for row in range(h):
+        line = raw[row * w * 4:(row + 1) * w * 4]
+        start = ((y + row) * width + x) * 3
+        frame[start:start + w * 3:3] = line[2::4]
+        frame[start + 1:start + w * 3:3] = line[1::4]
+        frame[start + 2:start + w * 3:3] = line[0::4]
+ppm = b"P6 %d %d 255\n" % (width, height) + bytes(frame)
+subprocess.run(["magick", "ppm:-", out], input=ppm, check=True)
+PY
+}
+
+fresh_disk() {
+    mkdir -p "$T"
+    rm -f "$T"/disk.qcow2 "$T"/vars.fd "$T"/serial.log "$T"/*.png
+    qemu-img create -q -f qcow2 "$T/disk.qcow2" 40G
+    cp "$OVMF/OVMF_VARS.4m.fd" "$T/vars.fd"
+}
+
+# A checkout as git would carry it, committed in a scratch repository and
+# served on git://10.0.2.2 (the host, as the machine sees it).
+serve_local() {
+    local src=$1 tree=$T/git/impasto
+    rm -rf "$T/git"
+    mkdir -p "$tree"
+    (cd "$src" && git ls-files -z -co --exclude-standard | tar --null -T - -cf -) | tar -xf - -C "$tree"
+    git -C "$tree" init -q -b snapshot
+    git -C "$tree" add -A
+    git -C "$tree" -c user.name=test -c user.email=test@localhost commit -qm snapshot
+    pkill -f "git-daemon.*$T/git" 2>/dev/null || true
+    git daemon --reuseaddr --export-all --base-path="$T/git" --listen=127.0.0.1 --port=$GIT_PORT \
+        --detach --pid-file="$T/git-daemon.pid" "$T/git"
+}
+
+# The drive the installer reads its answers from. The disk is the machine's
+# first virtio disk; the boot entries also get the serial console, where the
+# first boot writes as well as on screen.
+auto_drive() {
+    local repo=$1 branch=$2 dir=$T/auto
+    rm -rf "$dir" "$T/auto.img"
+    mkdir -p "$dir"
+    echo poweroff > "$dir/after"
+    cat > "$dir/creds.json" <<'EOF'
+{ "users": [ { "username": "impasto", "!password": "impasto", "sudo": true } ] }
+EOF
+    python3 - "$dir/archinstall.json" "$("$HERE/payload" "$repo" "$branch" /dev/ttyS0)" <<'PY'
+import json, sys, uuid
+dst, command = sys.argv[1:]
+mib = lambda value: {"unit": "MiB", "value": value, "sector_size": {"unit": "B", "value": 512}}
+def partition(start, size, fs, mountpoint, flags):
+    return {"obj_id": str(uuid.uuid4()), "status": "create", "type": "primary", "start": mib(start),
+            "size": mib(size), "fs_type": fs, "mountpoint": mountpoint, "mount_options": [],
+            "flags": flags, "btrfs": [], "dev_path": None}
+config = {
+    "disk_config": {"config_type": "default_layout", "device_modifications": [{
+        "device": "/dev/vda", "wipe": True, "partitions": [
+            partition(1, 1024, "fat32", "/boot", ["boot", "esp"]),
+            partition(1025, 40960 - 1025 - 1, "ext4", "/", []),
+        ]}]},
+    "hostname": "impasto-test",
+    "locale_config": {"kb_layout": "es", "sys_enc": "UTF-8", "sys_lang": "es_ES.UTF-8"},
+    "timezone": "Europe/Madrid",
+    "custom_commands": [
+        command.strip(),
+        "sed -i '/^options/ s/$/ console=tty0 console=ttyS0,115200/' /boot/loader/entries/*.conf",
+        "systemctl mask serial-getty@ttyS0.service",
+    ],
+}
+json.dump(config, open(dst, "w"), indent=2)
+PY
+    mke2fs -q -t ext4 -L IMPASTO_AUTO -d "$dir" "$T/auto.img" 16M
+}
+
+# QEMU key names for a character. QEMU sends key positions, so a symbol
+# depends on the guest's layout: US on the live medium, `es` on the installed
+# test system (TEST_KEYMAP=es).
+keys_for() {
+    python3 - "$1" "${TEST_KEYMAP:-us}" <<'PY'
+import sys
+text, keymap = sys.argv[1:]
+us = {" ": "spc", "\n": "ret", "\t": "tab", "`": "grave_accent", "-": "minus", "=": "equal",
+      "[": "bracket_left", "]": "bracket_right", "\\": "backslash", ";": "semicolon",
+      "'": "apostrophe", ",": "comma", ".": "dot", "/": "slash"}
+us.update({shifted: "shift-" + us[plain] for shifted, plain in zip('~_+{}|:"<>?', "`-=[]" + chr(92) + ";',./")})
+us.update({shifted: "shift-" + digit for shifted, digit in zip("!@#$%^&*()", "1234567890")})
+es = {" ": "spc", "-": "slash", "=": "shift-0", ".": "dot", ",": "comma", "/": "shift-7",
+      "'": "minus", "\n": "ret", "_": "shift-slash", ":": "shift-dot", ";": "shift-comma",
+      ">": "shift-less", "<": "less", "|": "alt_r-1", '"': "shift-2", "(": "shift-8",
+      ")": "shift-9", "&": "shift-6", "$": "shift-4", "~": "alt_r-4", "*": "shift-bracket_right",
+      "[": "alt_r-bracket_left", "]": "alt_r-bracket_right"}
+names = es if keymap == "es" else us
+for c in text:
+    if c.isalpha():
+        print(("shift-" if c.isupper() else "") + c.lower())
+    elif c.isdigit():
+        print(c)
+    else:
+        print(names[c])
+PY
+}
+
+press() {
+    local combo parts json
+    for combo in "$@"; do
+        IFS=- read -ra parts <<< "$combo"
+        json=$(printf '{"type":"qcode","data":"%s"},' "${parts[@]}")
+        qmp send-key "{\"keys\":[${json%,}]}" >/dev/null
+        sleep 0.05
+    done
+}
+
+# Sourced, it only defines the functions.
+[[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+
+case ${1:-} in
+    install)
+        shift
+        iso= checkout=
+        while (( $# )); do
+            case $1 in
+                --local) checkout=$(realpath "${2:?--local takes a path}"); shift ;;
+                *) iso=$1 ;;
+            esac
+            shift
+        done
+        iso=${iso:-$(latest_iso)}
+        fresh_disk
+        if [[ -n $checkout ]]; then
+            serve_local "$checkout"
+            auto_drive "git://10.0.2.2/impasto" snapshot
+        else
+            auto_drive https://github.com/andreumassanet/impasto.git main
+        fi
+        mapfile -t cd < <(medium "$iso")
+        machine "${cd[@]}" -drive file="$T/auto.img",if=virtio,format=raw
+        say 'installing: the machine switches itself off when Arch is in'
+        ;;
+    boot)
+        [[ -f $T/disk.qcow2 ]] || fail 'no disk: ./test install first'
+        machine
+        ;;
+    live)
+        fresh_disk
+        mapfile -t cd < <(medium "${2:-$(latest_iso)}")
+        machine "${cd[@]}"
+        ;;
+    shot)
+        running || fail 'no machine running'
+        out=$(realpath -m "${2:-$T/shot-$(date +%H%M%S).png}")
+        if ! qmp screendump "{\"filename\":\"$out\",\"format\":\"png\"}" >/dev/null 2>&1; then
+            vnc_shot "$out"
+        fi
+        echo "$out"
+        ;;
+    type)
+        running || fail 'no machine running'
+        mapfile -t k < <(keys_for "${2:?text}")
+        press "${k[@]}"
+        ;;
+    key)
+        running || fail 'no machine running'
+        shift
+        press "$@"
+        ;;
+    stop)
+        if running; then qmp quit >/dev/null 2>&1 || true; fi
+        while [[ -f $T/qemu.pid ]] && kill -0 "$(< "$T/qemu.pid")" 2>/dev/null; do sleep 0.2; done
+        rm -f "$QMP"
+        pkill -F "$T/git-daemon.pid" 2>/dev/null || true
+        ;;
+    *)
+        sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# \{0,1\}//'
+        ;;
+esac
