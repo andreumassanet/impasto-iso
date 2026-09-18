@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   S T A G E                                                              │
+# │   sets up the first boot · run inside the new system by archinstall      │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# archinstall runs this as its custom command, with its output in its own
+# log, so it only puts files in place. The desk is installed by firstboot.
+
+set -euo pipefail
+
+here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+
+install -Dm755 "$here/firstboot" /usr/local/lib/impasto/firstboot
+install -Dm644 "$here/impasto-firstboot.service" /etc/systemd/system/impasto-firstboot.service
+install -Dm600 "$here/impasto-install.conf" /etc/impasto-install.conf
+systemctl enable impasto-firstboot.service

@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   F I R S T B O O T                                                      │
+# │   the desk, installed on the first boot · clone, setup, login screen     │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# Run once, as root, by impasto-firstboot.service on tty1. The system is
+# booted, so pacman hooks, services and the network behave as they will from
+# now on. The unit only runs while /etc/impasto-install.conf exists.
+
+set -uo pipefail
+
+CONF=/etc/impasto-install.conf
+LOG=/var/log/impasto-install.log
+SUDOERS=/etc/sudoers.d/zz-impasto-install
+
+REPO=https://github.com/andreumassanet/impasto.git
+BRANCH=main
+ALSO=
+# shellcheck source=/dev/null
+. "$CONF"
+
+exec > >(tee -a "$LOG" ${ALSO:+"$ALSO"}) 2>&1
+
+say()  { printf '  %s\n' "$*"; }
+rule() { printf '\n\e[1m── %s ──\e[0m\n' "$*"; }
+
+# The sudo rule only lives while this runs: setup asks sudo for pacman and
+# for the copy into /, and nobody is there to type a password. Named to sort
+# after archinstall's numbered rules, since the last match wins; `sudo -v`
+# goes by every rule instead, unless verifypw says any.
+cleanup() { rm -f "$SUDOERS"; }
+trap cleanup EXIT
+
+online() { curl -fsI --max-time 5 https://archlinux.org >/dev/null 2>&1; }
+
+# Ethernet comes up on its own. Wi-Fi from the live system is not carried
+# over, so it is asked for again here. Full-screen programs get the terminal
+# itself: their output is not for the log.
+network() {
+    local i
+    for (( i = 0; i < 20; i++ )); do
+        online && return 0
+        sleep 2
+    done
+    while ! online; do
+        say 'No network. Pick a connection in the next screen, then Quit.'
+        read -rp '  Enter to open it, s for a shell ' answer
+        case $answer in
+            s) bash </dev/tty >/dev/tty 2>&1 ;;
+            *) nmtui connect </dev/tty >/dev/tty 2>&1 ;;
+        esac
+    done
+}
+
+# The first person archinstall made: the lowest uid from 1000.
+user=$(awk -F: '$3 >= 1000 && $3 < 60000 { print $3, $1 }' /etc/passwd | sort -n | awk 'NR == 1 { print $2 }')
+home=$(getent passwd "$user" | cut -d: -f6)
+
+install_desk() {
+    printf 'Defaults:%s verifypw=any\n%s ALL=(ALL) NOPASSWD: ALL\n' "$user" "$user" > "$SUDOERS"
+    chmod 440 "$SUDOERS"
+    if [[ ! -d $home/impasto/.git ]]; then
+        rule "impasto ($BRANCH)"
+        runuser -u "$user" -- git clone --branch "$BRANCH" "$REPO" "$home/impasto" || return 1
+    fi
+    # A session bus of its own, so what is stored through D-Bus (dark GTK,
+    # Thunar's settings) is written now rather than at the first login.
+    runuser -l "$user" -c "cd ~/impasto && dbus-run-session -- ./setup install --noconfirm $*"
+}
+
+# A sudo that failed while nobody could answer counts against the account,
+# and three lock it: the login screen starts with the count at zero.
+finish() {
+    rm -f "$CONF"
+    faillock --user "$user" --reset 2>/dev/null
+    systemctl disable impasto-firstboot.service 2>/dev/null
+    rule done
+    if systemctl is-enabled --quiet display-manager.service 2>/dev/null; then
+        say 'The login screen comes up now.'
+        sleep 3
+        systemctl --no-block start display-manager.service
+    else
+        say 'No display manager is enabled: log in on this console.'
+        sleep 3
+        systemctl --no-block start getty@tty1.service
+    fi
+    exit 0
+}
+
+dmesg -n 1
+clear
+printf '\n\e[1m  impasto\e[0m\n'
+say 'Installing the desk on the first boot: 10 to 20 minutes, online.'
+say "Everything is logged to $LOG."
+
+if [[ -z $user ]]; then
+    say 'No user account was made. Create one (useradd -m -G wheel NAME), then reboot.'
+    exec bash </dev/tty >/dev/tty 2>&1
+fi
+
+rule network
+network
+say 'online'
+
+args=()
+while :; do
+    if install_desk "${args[@]}"; then finish; fi
+    rule 'the install stopped'
+    say "The reason is above, and in $LOG."
+    say 'r  try again'
+    say 'p  try again, leaving the packages as they are'
+    say 's  a shell, then back here'
+    say 'l  go to the login screen and finish later with ./setup install'
+    read -rp '  ' answer
+    case $answer in
+        p) args=(--skip-packages) ;;
+        s) bash </dev/tty >/dev/tty 2>&1 ;;
+        l) finish ;;
+        *) args=() ;;
+    esac
+done

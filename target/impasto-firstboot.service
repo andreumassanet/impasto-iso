@@ -1,0 +1,31 @@
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   I M P A S T O - F I R S T B O O T                                      │
+# │   the first boot installs the desk, on tty1, before the login screen     │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+[Unit]
+Description=Install the impasto desk
+Documentation=https://github.com/andreumassanet/impasto
+ConditionPathExists=/etc/impasto-install.conf
+Wants=network-online.target
+After=network-online.target systemd-user-sessions.service
+Before=getty@tty1.service display-manager.service
+Conflicts=getty@tty1.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/impasto/firstboot
+StandardInput=tty-force
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

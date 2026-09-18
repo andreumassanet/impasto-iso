@@ -1,0 +1,19 @@
+{
+  "archinstall-language": "English",
+  "app_config": {
+    "audio_config": { "audio": "pipewire" },
+    "bluetooth_config": { "enabled": true }
+  },
+  "bootloader_config": { "bootloader": "Systemd-boot", "uki": false, "removable": false },
+  "hostname": "impasto",
+  "kernels": ["linux"],
+  "locale_config": { "kb_layout": "us", "sys_enc": "UTF-8", "sys_lang": "en_US.UTF-8" },
+  "network_config": { "type": "nm" },
+  "ntp": true,
+  "packages": ["git"],
+  "pacman_config": { "parallel_downloads": 8 },
+  "profile_config": { "profile": { "main": "Xorg" }, "gfx_driver": "All open-source" },
+  "swap": { "enabled": true, "algorithm": "zstd" },
+  "timezone": "UTC",
+  "custom_commands": []
+}

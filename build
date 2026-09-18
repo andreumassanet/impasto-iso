@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   B U I L D                                                              │
+# │   the ISO · Arch's own live profile, with the installer on top           │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# Usage: sudo ./build [--branch NAME] [--repo URL] [--out DIR]
+#
+# Starts from releng, the profile the official ISO is built from, as the
+# installed archiso has it, so the medium boots whatever Arch's does. The desk
+# is not on it: the first boot clones --branch of --repo, so the ISO only
+# needs building again when the installer changes.
+
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+RELENG=/usr/share/archiso/configs/releng
+REPO=https://github.com/andreumassanet/impasto.git
+BRANCH=main
+OUT=$HERE/out
+WORK=$HERE/work
+
+fail() { printf 'build: %s\n' "$*" >&2; exit 1; }
+
+while (( $# )); do
+    case $1 in
+        --branch) BRANCH=${2:?--branch takes a name}; shift ;;
+        --repo)   REPO=${2:?--repo takes a URL}; shift ;;
+        --out)    OUT=$(realpath -m "${2:?--out takes a directory}"); shift ;;
+        -h|--help) sed -n '/^# Usage/,/^$/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) fail "unknown option: $1" ;;
+    esac
+    shift
+done
+
+(( EUID == 0 )) || fail 'mkarchiso runs as root: sudo ./build'
+[[ -d $RELENG ]] || fail 'archiso is not installed (pacman -S archiso)'
+
+rm -rf "$WORK"
+profile=$WORK/profile
+mkdir -p "$profile"
+cp -a "$RELENG/." "$profile/"
+cp -a "$HERE/live/." "$profile/airootfs/"
+
+# releng can name a package the repositories have dropped since archiso was
+# released (broadcom-wl, in archiso 89), and one missing name fails the build.
+# Checked against freshly synced databases, not the host's, which lag.
+mkdir -p "$WORK/db"
+pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Sy >/dev/null
+declare -A known=()
+while read -r name; do known[$name]=1; done < <(pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Slq)
+while read -r name; do
+    [[ -z $name || $name == \#* || -n ${known[$name]:-} ]] && continue
+    pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Sp --print-format %n "$name" >/dev/null 2>&1 && continue
+    printf 'build: %s is no longer in the repositories, left out\n' "$name"
+    sed -i "/^${name}\$/d" "$profile/packages.x86_64"
+done < "$profile/packages.x86_64"
+
+sed -i -e 's/^iso_name=.*/iso_name="impasto"/' \
+    -e 's/^iso_label="ARCH_/iso_label="IMPASTO_/' \
+    -e 's|^iso_publisher=.*|iso_publisher="impasto <https://github.com/andreumassanet/impasto>"|' \
+    -e 's|^iso_application=.*|iso_application="impasto install medium"|' \
+    "$profile/profiledef.sh"
+printf 'file_permissions+=(["/usr/local/bin/impasto-install"]="0:0:755")\n' >> "$profile/profiledef.sh"
+grep -rl 'Arch Linux install medium' "$profile/efiboot" "$profile/syslinux" "$profile/grub" |
+    xargs -r sed -i 's/Arch Linux install medium/impasto install medium/'
+
+cat >> "$profile/airootfs/root/.zlogin" <<'EOF'
+
+# impasto: the installer opens on the first console
+if [[ $(tty) == /dev/tty1 ]]; then
+    impasto-install
+fi
+EOF
+
+mkdir -p "$profile/airootfs/usr/local/share/impasto"
+"$HERE/payload" "$REPO" "$BRANCH" > "$WORK/command"
+python3 - "$HERE/archinstall.json" "$WORK/command" \
+    "$profile/airootfs/usr/local/share/impasto/archinstall.json" <<'PY'
+import json, sys
+src, command, dst = sys.argv[1:]
+config = json.load(open(src))
+config["custom_commands"] = [open(command).read().strip()]
+with open(dst, "w") as f:
+    json.dump(config, f, indent=2)
+PY
+
+mkdir -p "$OUT"
+mkarchiso -v -w "$WORK/mkarchiso" -o "$OUT" "$profile"
+rm -rf "$WORK"
+if [[ -n ${SUDO_UID:-} ]]; then chown -R "$SUDO_UID:$SUDO_GID" "$OUT"; fi
+ls -lh "$OUT"/*.iso

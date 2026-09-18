@@ -1,0 +1,182 @@
+#!/usr/bin/env bash
+# ╭──────────────────────────────────────────────────────────────────────────╮
+# │                                                                          │
+# │   I M P A S T O - I N S T A L L                                          │
+# │   Arch Linux with the desk · archinstall, then the first boot            │
+# │                                                                          │
+# │   github.com/andreumassanet/impasto                                      │
+# │                                                                          │
+# ╰──────────────────────────────────────────────────────────────────────────╯
+
+# Starts on tty1 when the medium boots. archinstall installs Arch with the
+# answers below already filled in; its custom command sets up the first boot,
+# which installs the desk. A drive labelled IMPASTO_AUTO holding
+# archinstall.json and creds.json installs with no questions.
+
+set -uo pipefail
+
+SHARE=/usr/local/share/impasto
+CONFIG=/tmp/impasto-archinstall.json
+TARGET=/mnt
+AUTO=/dev/disk/by-label/IMPASTO_AUTO
+
+say() { printf '  %s\n' "$*"; }
+bold() { printf '  \e[1m%s\e[0m\n' "$*"; }
+
+online() { curl -fsI --max-time 5 https://archlinux.org >/dev/null 2>&1; }
+
+# Ethernet is up within a few seconds of boot; Wi-Fi is set up by hand.
+network() {
+    local i answer
+    for (( i = 0; i < 15; i++ )); do
+        online && return 0
+        sleep 1
+    done
+    while ! online; do
+        echo
+        bold 'No network.'
+        say 'Ethernet connects on its own. For Wi-Fi, in iwctl:'
+        say '  device list                       the name of the Wi-Fi card'
+        say '  station wlan0 get-networks        what it can see'
+        say '  station wlan0 connect NAME        then the password, then exit'
+        read -rp '  Enter to open iwctl, s for a shell ' answer
+        case $answer in
+            s) zsh ;;
+            *) iwctl ;;
+        esac
+    done
+}
+
+# What the answers start as: UEFI boots with systemd-boot, BIOS with GRUB, and
+# the graphics driver is the one for the card that is fitted. NVIDIA from
+# Turing (device 1e00) on takes the open kernel module; before it, nouveau.
+gpu_driver() {
+    local cards id
+    cards=$(lspci -nn -d ::0300; lspci -nn -d ::0302; lspci -nn -d ::0380)
+    id=$(grep -io '\[10de:[0-9a-f]\{4\}\]' <<< "$cards" | head -1 | cut -c7-10)
+    if [[ -n $id ]]; then
+        if (( 16#$id >= 16#1e00 )); then
+            echo 'Nvidia (open kernel module for newer GPUs, Turing+)'
+        else
+            echo 'Nvidia (open-source nouveau driver)'
+        fi
+    elif grep -q '\[1002:' <<< "$cards"; then
+        echo 'AMD / ATI (open-source)'
+    elif grep -q '\[8086:' <<< "$cards"; then
+        echo 'Intel (open-source)'
+    else
+        echo 'All open-source'
+    fi
+}
+
+# $1 a JSON file whose keys replace ours, or nothing.
+write_config() {
+    local loader=Systemd-boot
+    [[ -d /sys/firmware/efi ]] || loader=Grub
+    python3 - "$SHARE/archinstall.json" "$CONFIG" "$(gpu_driver)" "$loader" "${1:-}" <<'PY'
+import json, sys
+src, dst, driver, loader, extra = sys.argv[1:]
+config = json.load(open(src))
+config["profile_config"]["gfx_driver"] = driver
+config["bootloader_config"]["bootloader"] = loader
+if extra:
+    config.update(json.load(open(extra)))
+with open(dst, "w") as f:
+    json.dump(config, f, indent=2)
+PY
+}
+
+# Every disk but the medium, and what is on it, so the one with Windows on it
+# is not the one picked.
+disks() {
+    local src medium line NAME SIZE TYPE MODEL fs note
+    src=$(findmnt -no SOURCE /run/archiso/bootmnt 2>/dev/null)
+    medium=$(lsblk -no PKNAME "$src" 2>/dev/null | head -1)
+    medium=/dev/${medium:-${src#/dev/}}
+    bold 'The disks in this machine'
+    while read -r line; do
+        eval "$line"
+        [[ $TYPE == disk && $NAME != "$medium" ]] || continue
+        [[ $NAME == "$(readlink -f "$AUTO" 2>/dev/null)" ]] && continue
+        fs=$(lsblk -nlo FSTYPE "$NAME" | sed '/^$/d' | sort -u | tr '\n' ' ')
+        if [[ $fs == *ntfs* ]]; then
+            note=$'\e[1;33mWindows is on this one\e[0m'
+        elif [[ -z $fs ]]; then
+            note='empty'
+        else
+            note="holds ${fs% }"
+        fi
+        printf '  %-16s %8s  %-26.26s %s\n' "$NAME" "$SIZE" "${MODEL:--}" "$note"
+    done < <(lsblk -dnpP -o NAME,SIZE,TYPE,MODEL)
+}
+
+# archinstall leaves the new system mounted when it is left with Exit.
+installed() { [[ -f $TARGET/etc/impasto-install.conf ]]; }
+
+reboot_now() {
+    echo
+    bold 'Arch is installed.'
+    say 'Take the USB stick out, then Enter to reboot. The first boot installs'
+    say 'the desk (10 to 20 minutes, online), then the login screen comes up.'
+    read -r
+    umount -R "$TARGET" 2>/dev/null
+    reboot
+}
+
+# No questions: the drive's archinstall.json is laid over ours and its
+# creds.json holds the accounts. `after` on it says reboot (the default) or
+# poweroff.
+automatic() {
+    local drive=/run/impasto-auto after=reboot
+    mkdir -p "$drive"
+    mount "$AUTO" "$drive" || return 1
+    [[ -f $drive/after ]] && after=$(< "$drive/after")
+    bold 'Installing from the IMPASTO_AUTO drive'
+    write_config "$drive/archinstall.json"
+    archinstall --config "$CONFIG" --creds "$drive/creds.json" --silent
+    cp /var/log/archinstall/install.log "$drive/install.log" 2>/dev/null
+    umount "$drive"
+    if installed; then
+        umount -R "$TARGET" 2>/dev/null
+        "$after"
+    fi
+    bold 'The install did not finish: the log is /var/log/archinstall/install.log'
+    return 1
+}
+
+clear
+echo
+bold 'impasto'
+say 'Arch Linux, with the desk installed on top.'
+echo
+
+network
+
+if [[ -e $AUTO ]]; then
+    automatic
+    exit 1
+fi
+
+write_config
+while :; do
+    clear
+    echo
+    bold 'impasto'
+    echo
+    disks
+    echo
+    bold 'In the menu that follows'
+    say 'Disk configuration   the disk Arch goes on: everything on it is erased'
+    say 'Authentication       your user, with sudo, and its password'
+    say 'Locales, Timezone    your keyboard, language and time zone'
+    say 'The rest is filled in, the graphics driver too. Then Install.'
+    echo
+    read -rp '  Enter to open the installer, s for a shell ' answer
+    [[ $answer == s ]] && { zsh; continue; }
+    archinstall --config "$CONFIG"
+    if installed; then reboot_now; fi
+    echo
+    say 'The installer closed without installing.'
+    read -rp '  Enter to open it again, s for a shell ' answer
+    [[ $answer == s ]] && zsh
+done
