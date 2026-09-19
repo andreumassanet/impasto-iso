@@ -24,7 +24,85 @@ BRANCH=main
 OUT=$HERE/out
 WORK=$HERE/work
 
-fail() { printf 'build: %s\n' "$*" >&2; exit 1; }
+
+# ── THE SCREEN ──────────────────────────────────────────────────────────────
+#
+# What `setup` and the medium open on. The wordmark is a third copy: the two
+# scripts under live/ and target/ cannot read a file from this checkout, so a
+# shared one would leave the drawing in three places anyway. The three are
+# kept identical by hand.
+
+ATTY=0
+if [[ -t 1 ]]; then ATTY=1; fi
+if (( ATTY )) && [[ -z ${NO_COLOR:-} && ${TERM:-dumb} != dumb ]]; then
+    TEXT=$'\e[97m' MUTED=$'\e[37m' FAINT=$'\e[90m' ACCENT=$'\e[33m' WARN=$'\e[31m'
+    OFF=$'\e[0m' BOLD=$'\e[1m'
+else
+    TEXT= MUTED= FAINT= ACCENT= WARN= OFF= BOLD=
+fi
+
+MARK=(
+    '██  ██▄    ▄██  ███████▄   ▄█████▄   ▄███████  ████████  ▄███████▄'
+    '██  ██▀█▄▄█▀██  ██    ██  ██     ██  ██▄▄▄▄▄      ██     ██     ██'
+    '██  ██  ▀▀  ██  ███████▀  █████████   ▀▀▀▀▀██     ██     ██     ██'
+    '██  ██      ██  ██        ██     ██  ███████▀     ██     ▀███████▀'
+)
+
+# Nought when the output is not a terminal, and then the mark is not drawn at
+# all: a log wants the lines, not the drawing.
+columns() {
+    local size
+    # Asked inside a command substitution, `-t 1` is a pipe's answer and not
+    # the terminal's, so the question is put once, at the top.
+    if (( ! ATTY )); then printf 0; return 0; fi
+    size=$(stty size 2>/dev/null </dev/tty) || size=
+    # shellcheck disable=SC2086
+    set -- $size
+    if [[ ${2:-} =~ ^[0-9]+$ ]] && (( $2 > 8 )); then
+        if (( $2 < 76 )); then printf '%s' "$2"; else printf 76; fi
+    else
+        printf 76
+    fi
+}
+
+mark() {
+    local row width
+    width=$(columns)
+    if (( ! width )); then return 0; fi
+    printf '\n'
+    if (( width < 70 )); then
+        printf '  %s%sI M P A S T O%s\n\n' "$BOLD" "$ACCENT" "$OFF"
+        return 0
+    fi
+    for row in "${MARK[@]}"; do printf '  %s%s%s\n' "$ACCENT" "$row" "$OFF"; done
+    printf '\n'
+}
+
+# A rule across the width, and on the right whatever the caller has to say.
+section() {
+    local name=$1 note=${2:-} fill dashes= width
+    width=$(columns)
+    if (( width )); then
+        fill=$(( width - 5 - ${#name} ))
+        if [[ -n $note ]]; then fill=$(( fill - ${#note} - 2 )); fi
+    else
+        fill=2
+    fi
+    if (( fill < 1 )); then fill=1; fi
+    while (( fill-- > 0 )); do dashes+='─'; done
+    printf '%s── %s%s%s %s' "$FAINT" "$TEXT$BOLD" "$name" "$OFF$FAINT" "$dashes"
+    if [[ -n $note ]]; then printf ' %s%s' "$MUTED" "$note"; fi
+    printf '%s\n' "$OFF"
+}
+
+say() { printf '  %s\n' "$*"; }
+
+elapsed() {
+    if (( SECONDS >= 60 )); then printf '%dm %02ds' $(( SECONDS / 60 )) $(( SECONDS % 60 ))
+    else printf '%ds' "$SECONDS"; fi
+}
+
+fail() { printf '%sbuild:%s %s\n' "$WARN" "$OFF" "$*" >&2; exit 1; }
 
 while (( $# )); do
     case $1 in
@@ -40,26 +118,36 @@ done
 (( EUID == 0 )) || fail 'mkarchiso runs as root: sudo ./build'
 [[ -d $RELENG ]] || fail 'archiso is not installed (pacman -S archiso)'
 
+mark
+SECONDS=0
+
+section profile
 rm -rf "$WORK"
 profile=$WORK/profile
 mkdir -p "$profile"
 cp -a "$RELENG/." "$profile/"
 cp -a "$HERE/live/." "$profile/airootfs/"
+say "releng, as archiso $(pacman -Q archiso 2>/dev/null | cut -d' ' -f2) has it, with live/ over it"
 
 # releng can name a package the repositories have dropped since archiso was
 # released (broadcom-wl, in archiso 89), and one missing name fails the build.
 # Checked against freshly synced databases, not the host's, which lag.
+section packages
 mkdir -p "$WORK/db"
 pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Sy >/dev/null
 declare -A known=()
+left=0
 while read -r name; do known[$name]=1; done < <(pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Slq)
 while read -r name; do
     [[ -z $name || $name == \#* || -n ${known[$name]:-} ]] && continue
     pacman --config "$profile/pacman.conf" --dbpath "$WORK/db" -Sp --print-format %n "$name" >/dev/null 2>&1 && continue
-    printf 'build: %s is no longer in the repositories, left out\n' "$name"
+    say "left out $name — the repositories no longer have it"
     sed -i "/^${name}\$/d" "$profile/packages.x86_64"
+    left=$(( left + 1 ))
 done < "$profile/packages.x86_64"
+if (( ! left )); then say "every package releng names is in the repositories"; fi
 
+section medium
 sed -i -e 's/^iso_name=.*/iso_name="impasto"/' \
     -e 's/^iso_label="ARCH_/iso_label="IMPASTO_/' \
     -e 's|^iso_publisher=.*|iso_publisher="impasto <https://github.com/andreumassanet/impasto>"|' \
@@ -83,6 +171,9 @@ if [[ $(tty) == /dev/tty1 ]]; then
 fi
 EOF
 
+say 'the name, the labels, the boot menus and the launcher on tty1'
+
+section installer
 mkdir -p "$profile/airootfs/usr/local/share/impasto"
 "$HERE/payload" "$REPO" "$BRANCH" > "$WORK/command"
 python3 - "$HERE/archinstall.json" "$WORK/command" \
@@ -95,8 +186,17 @@ with open(dst, "w") as f:
     json.dump(config, f, indent=2)
 PY
 
+say "archinstall's answers, and the first boot that installs $BRANCH of $REPO"
+
+section mkarchiso 'its own output follows'
 mkdir -p "$OUT"
 mkarchiso -v -w "$WORK/mkarchiso" -o "$OUT" "$profile"
 rm -rf "$WORK"
 if [[ -n ${SUDO_UID:-} ]]; then chown -R "$SUDO_UID:$SUDO_GID" "$OUT"; fi
-ls -lh "$OUT"/*.iso
+
+mapfile -t built < <(ls -t "$OUT"/*.iso)
+iso=${built[0]}
+section done "$(elapsed)"
+# mkarchiso has just said how big it is; this is where it landed.
+say "${iso#"$HERE"/}"
+say 'dd it onto a stick, or try it first: ./test live'
