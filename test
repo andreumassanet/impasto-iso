@@ -25,6 +25,15 @@
 # Everything lands in test-run/: the disk, the firmware's variables, the
 # serial console (serial.log, where the first boot writes too) and the
 # pictures. Runs as the user; needs qemu-desktop and edk2-ovmf.
+#
+# The machine has no window of its own. QEMU's VNC server is on the socket
+# `shot` reads, so to sit in front of the machine instead — to answer
+# archinstall by hand — bridge that socket and point a VNC client at it:
+#
+#   socat TCP-LISTEN:5901,reuseaddr,fork UNIX-CONNECT:test-run/vnc.sock &
+#   remote-viewer vnc://127.0.0.1:5901
+#
+# A VNC URL of its own for the socket is not the way in: gtk-vnc wants a host.
 
 set -euo pipefail
 
