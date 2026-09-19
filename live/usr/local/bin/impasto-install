@@ -20,6 +20,98 @@ CONFIG=/tmp/impasto-archinstall.json
 TARGET=/mnt
 AUTO=/dev/disk/by-label/IMPASTO_AUTO
 
+
+# ── THE SCREEN ──────────────────────────────────────────────────────────────
+#
+# What `setup` opens on, in the sixteen colours a console has. Both scripts
+# here carry a copy: this one is on the medium and firstboot travels inside
+# the payload, into a system the medium cannot reach, so there is nowhere the
+# two of them could share a file.
+
+MARK=(
+    '██  ██▄    ▄██  ███████▄   ▄█████▄   ▄███████  ████████  ▄███████▄'
+    '██  ██▀█▄▄█▀██  ██    ██  ██     ██  ██▄▄▄▄▄      ██     ██     ██'
+    '██  ██  ▀▀  ██  ███████▀  █████████   ▀▀▀▀▀██     ██     ██     ██'
+    '██  ██      ██  ██        ██     ██  ███████▀     ██     ▀███████▀'
+)
+
+# Half blocks are in no console font by right: Terminus carries █ and neither
+# ▀ nor ▄. default8x16 has all three, at the size the console already is,
+# and comes with kbd, which is in base.
+mark() {
+    local row size rows columns
+    if [[ $(tty) == /dev/tty[0-9]* ]]; then setfont default8x16 2>/dev/null; fi
+    size=$(stty size 2>/dev/null </dev/tty) || size=
+    # shellcheck disable=SC2086
+    set -- $size
+    rows=${1:-0}
+    columns=${2:-0}
+    printf '\n'
+    # A console with no room for the drawing gets the name instead: the screen
+    # under it has to fit, or the menu redraws over whatever scrolled.
+    if (( columns < 70 || rows < 28 )); then
+        printf '  \e[1;33mI M P A S T O\e[0m\n\n'
+        return 0
+    fi
+    for row in "${MARK[@]}"; do printf '  \e[33m%s\e[0m\n' "$row"; done
+    printf '\n'
+}
+
+# One keypress, an arrow's three bytes arriving as one word.
+key() {
+    local k rest
+    IFS= read -rsn1 k </dev/tty || return 1
+    if [[ $k == $'\e' ]]; then
+        IFS= read -rsn2 -t 0.02 rest </dev/tty || rest=
+        case $rest in
+            '[A') k=up ;;
+            '[B') k=down ;;
+            *)    k=other ;;
+        esac
+    fi
+    case $k in
+        '') k=enter ;;
+        j)  k=down ;;
+        k)  k=up ;;
+    esac
+    printf '%s' "$k"
+}
+
+# $@ rows, each "name:what it does". What was picked is left in CHOSEN. The
+# drawing goes to the terminal rather than to stdout, which in firstboot is a
+# pipe into the log, and a log full of cursor moves reads as nothing at all.
+CHOSEN=
+choose() {
+    local -a rows=("$@")
+    local at=0 drawn=0 i k name note
+    printf '\e[?25l' > /dev/tty
+    while :; do
+        if (( drawn )); then printf '\e[%dF\e[0J' "$drawn" > /dev/tty; fi
+        drawn=0
+        for i in "${!rows[@]}"; do
+            name=${rows[i]%%:*}
+            note=${rows[i]#*:}
+            if (( i == at )); then
+                printf '  \e[33m▸\e[0m \e[1m%-9s\e[0m %s\n' "$name" "$note" > /dev/tty
+            else
+                printf '    \e[90m%-9s %s\e[0m\n' "$name" "$note" > /dev/tty
+            fi
+            drawn=$(( drawn + 1 ))
+        done
+        printf '\n  \e[1m↑↓\e[0m \e[90mmove\e[0m   \e[1menter\e[0m \e[90mchoose\e[0m\n' > /dev/tty
+        drawn=$(( drawn + 2 ))
+        k=$(key) || k=enter
+        case $k in
+            up)    at=$(( at ? at - 1 : ${#rows[@]} - 1 )) ;;
+            down)  at=$(( (at + 1) % ${#rows[@]} )) ;;
+            enter) break ;;
+        esac
+    done
+    printf '\e[?25h' > /dev/tty
+    CHOSEN=${rows[at]%%:*}
+}
+
+
 say() { printf '  %s\n' "$*"; }
 bold() { printf '  \e[1m%s\e[0m\n' "$*"; }
 
@@ -145,8 +237,7 @@ automatic() {
 }
 
 clear
-echo
-bold 'impasto'
+mark
 say 'Arch Linux, with the desk installed on top.'
 echo
 
@@ -160,23 +251,29 @@ fi
 write_config
 while :; do
     clear
-    echo
-    bold 'impasto'
-    echo
+    mark
     disks
     echo
-    bold 'In the menu that follows'
+    bold 'The installer asks for'
     say 'Disk configuration   the disk Arch goes on: everything on it is erased'
     say 'Authentication       your user, with sudo, and its password'
     say 'Locales, Timezone    your keyboard, language and time zone'
     say 'The rest is filled in, the graphics driver too. Then Install.'
     echo
-    read -rp '  Enter to open the installer, s for a shell ' answer
-    [[ $answer == s ]] && { zsh; continue; }
-    archinstall --config "$CONFIG"
+    choose 'install:archinstall, with the answers above already in it' \
+           'plain:archinstall on its own, with nothing filled in' \
+           'shell:a shell here, and back to this screen' \
+           'reboot:take the medium out first'
+    case $CHOSEN in
+        shell)  zsh; continue ;;
+        reboot) reboot; exit 0 ;;
+        plain)  archinstall ;;
+        *)      archinstall --config "$CONFIG" ;;
+    esac
     if installed; then reboot_now; fi
     echo
     say 'The installer closed without installing.'
-    read -rp '  Enter to open it again, s for a shell ' answer
-    [[ $answer == s ]] && zsh
+    choose 'again:open the installer again' \
+           'shell:a shell here, and back to this screen'
+    [[ $CHOSEN == shell ]] && zsh
 done

@@ -35,9 +35,11 @@ From Windows, Rufus in DD mode, or Ventoy.
 
 Boot the stick in UEFI mode. Ethernet connects on its own; for Wi-Fi the
 medium opens `iwctl`. It lists the disks first, and says which one Windows is
-on, so a machine with two disks keeps Windows on its own: pick the other one
-in **Disk configuration**. Then **Authentication** for your user and
-**Locales** and **Timezone**, and **Install**.
+on, so a machine with two disks keeps Windows on its own, and then asks what
+to do with the arrow keys: open the installer, open archinstall on its own, a
+shell, or reboot. In the installer, pick the other disk in **Disk
+configuration**. Then **Authentication** for your user and **Locales** and
+**Timezone**, and **Install**.
 
 Reboot when it is done. The first boot takes 10 to 20 minutes, online, and if
 something fails it says why and offers to try again. The first time you log
