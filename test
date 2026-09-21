@@ -239,11 +239,15 @@ us = {" ": "spc", "\n": "ret", "\t": "tab", "`": "grave_accent", "-": "minus", "
       "'": "apostrophe", ",": "comma", ".": "dot", "/": "slash"}
 us.update({shifted: "shift-" + us[plain] for shifted, plain in zip('~_+{}|:"<>?', "`-=[]" + chr(92) + ";',./")})
 us.update({shifted: "shift-" + digit for shifted, digit in zip("!@#$%^&*()", "1234567890")})
-es = {" ": "spc", "-": "slash", "=": "shift-0", ".": "dot", ",": "comma", "/": "shift-7",
-      "'": "minus", "\n": "ret", "_": "shift-slash", ":": "shift-dot", ";": "shift-comma",
-      ">": "shift-less", "<": "less", "|": "alt_r-1", '"': "shift-2", "(": "shift-8",
-      ")": "shift-9", "&": "shift-6", "$": "shift-4", "~": "alt_r-4", "*": "shift-bracket_right",
-      "[": "alt_r-bracket_left", "]": "alt_r-bracket_right"}
+es = {" ": "spc", "\n": "ret", "\t": "tab", "'": "minus", "-": "slash", ".": "dot", ",": "comma",
+      "<": "less", "+": "bracket_right"}
+es.update({shifted: "shift-" + key for shifted, key in
+           zip('!"$%&/()=?_:;>*', ["1", "2", "4", "5", "6", "7", "8", "9", "0", "minus", "slash",
+                                   "dot", "comma", "less", "bracket_right"])})
+es.update({typed: "alt_r-" + key for typed, key in
+           zip("|@#~[]{}", ["1", "2", "3", "4", "bracket_left", "bracket_right", "apostrophe",
+                            "backslash"])})
+es["\\"] = "alt_r-grave_accent"
 names = es if keymap == "es" else us
 for c in text:
     if c.isalpha():
