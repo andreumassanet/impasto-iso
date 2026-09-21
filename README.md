@@ -13,7 +13,13 @@ screen comes up for the first time.
 It installs online: the desk is fetched when it is installed, not carried on
 the medium, so the ISO only needs building again when the installer changes.
 
+The step-by-step guide is on the documentation site:
+**https://andreumassanet.github.io/impasto-docs/start/usb/**
+
 ## Building it
+
+There is no ISO to download: it is built with archiso, on a machine that
+already runs Arch Linux.
 
 ```bash
 sudo pacman -S --needed archiso
@@ -58,3 +64,7 @@ inside the session: it asks for your password once.
 ./test shot                     # a picture of the screen
 ./test stop
 ```
+
+## License
+
+[GNU GPL-3.0](LICENSE), like impasto.
